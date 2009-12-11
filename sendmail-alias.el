@@ -1,21 +1,20 @@
 ;;; sendmail-alias.el --- parse a sendmail-style alias file
 
 ;; Copyright (C) 1992 Roland McGrath
-;; Copyright (C) 1993, 1995 Noah S. Friedman
+;; Copyright (C) 1993, 1995, 2009 Noah S. Friedman
 
 ;; Author: Roland McGrath <roland@frob.com>
 ;;         Noah Friedman <friedman@splode.com>
 ;; Maintainer: friedman@splode.com
 ;; Keywords: mail, extensions
-;; Status: known to work in FSF GNU Emacs 19.27 or later.
 ;; Created: 1992-04-07
 
-;; $Id: sendmail-alias.el,v 1.6 2001/08/31 09:45:05 friedman Exp $
+;; $Id: sendmail-alias.el,v 1.7 2009/08/26 02:03:57 friedman Exp $
 
-;; This program is free software; you can redistribute it and/or modify
+;; This program is free software: you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
-;; the Free Software Foundation; either version 2, or (at your option)
-;; any later version.
+;; the Free Software Foundation; either version 2 of the License, or
+;; (at your option) any later version.
 ;;
 ;; This program is distributed in the hope that it will be useful,
 ;; but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -23,9 +22,7 @@
 ;; GNU General Public License for more details.
 ;;
 ;; You should have received a copy of the GNU General Public License
-;; along with this program; if not, you can either send email to this
-;; program's maintainer or write to: The Free Software Foundation,
-;; Inc.; 675 Massachusetts Avenue; Cambridge, MA 02139, USA.
+;; along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 
@@ -55,10 +52,10 @@
 ;; already been called.  You can, however, do the following:
 ;;
 ;;        (add-hook 'mail-mode-hook
-;;                  #'(lambda ()
-;;                      (and (boundp 'mail-setup-hook)
-;;                           (memq 'mail-abbrevs-setup mail-setup-hook)
-;;                           (setq mail-aliases nil))))
+;;                  (lambda ()
+;;                    (and (boundp 'mail-setup-hook)
+;;                         (memq 'mail-abbrevs-setup mail-setup-hook)
+;;                         (setq mail-aliases nil))))
 ;;
 ;; This works because build-mail-aliases only rebuilds mail-aliases if it
 ;; is set to `t'.
@@ -78,9 +75,7 @@ the `Mail' or `mailx' program, but that is not strictly necessary (it
 depends on the underlying parsing agent).
 This file need not actually exist.")
 
-;;; This is called by mailalias.el.
-(defun build-mail-aliases (&optional file)
-  "Read mail aliases from `mail-personal-alias-file' and set `mail-aliases'."
+(defun sendmail-alias-build-table (defn tbl &optional file)
   (or file (setq file mail-personal-alias-file))
   (setq file (expand-file-name file))
   (message "Reading aliases from %s..." file)
@@ -92,43 +87,23 @@ This file need not actually exist.")
       (while (re-search-forward "^\\([^#\n][^: \t]*\\)[ \t]*:\\s *\
 \\([^\n]+\\(\n[ \t]+.*\\)*\\)"
                                 nil t)
-        (define-mail-alias
-          (buffer-substring (match-beginning 1) (match-end 1))
-          (buffer-substring (match-beginning 2) (match-end 2)))))
+        (funcall defn
+                 (buffer-substring (match-beginning 1) (match-end 1))
+                 (buffer-substring (match-beginning 2) (match-end 2)))))
     (kill-buffer buf))
-  ;; Read :include: files.
-  (funcall (if (vectorp mail-aliases) 'mapatoms 'mapcar)
-	   'sendmail-alias-expand-include
-	   mail-aliases)
-  (message "Reading aliases from %s...done" file))
-
-;; This is called by mailabbrev.el
-;; Note that in order for mail-mode to use mailabbrev, you have to do
-
-(defun build-mail-abbrevs (&optional file recursivep)
-  (or file (setq file mail-personal-alias-file))
-  (setq file (expand-file-name file))
-  (message "Reading aliases from %s..." file)
-  (if (vectorp mail-abbrevs)
-      nil
-    (setq mail-abbrevs nil)
-    (define-abbrev-table 'mail-abbrevs '()))
-  (let ((buf (generate-new-buffer " *aliases*")))
-    (save-excursion
-      (set-buffer buf)
-      (insert-file-contents file)
-      (goto-char (point-min))
-      (while (re-search-forward "^\\([^#\n][^: \t]*\\)[ \t]*:\\s *\
-\\([^\n]+\\(\n[ \t]+.*\\)*\\)"
-                                nil t)
-        (define-mail-abbrev
-          (buffer-substring (match-beginning 1) (match-end 1))
-          (buffer-substring (match-beginning 2) (match-end 2)))))
-    (kill-buffer buf))
-  ;; Read :include: files.
-  (funcall (if (vectorp mail-abbrevs) 'mapatoms 'mapcar)
-	   'sendmail-alias-expand-include
-	   mail-abbrevs)
+  ;; Read in :include: files and replace.
+  (cond ((vectorp (symbol-value tbl))
+         (mapatoms (lambda (sym)
+                     ;; abbrev tables have an interned symbol named ""
+                     ;; (i.e. the empty string) with no value.  Various
+                     ;; table parameters are stored on that symbol's
+                     ;; property list but we're not interested in those.
+                     ;; So skip symbols whose value is nil.
+                     (when (symbol-value sym)
+                       (sendmail-alias-expand-include sym)))
+                   (symbol-value tbl)))
+        (t
+         (mapc 'sendmail-alias-expand-include (symbol-value tbl))))
   (message "Reading aliases from %s...done" file))
 
 (defun sendmail-alias-expand-include (alias)
@@ -171,6 +146,26 @@ This file need not actually exist.")
     (if (symbolp alias)
 	(set alias expansion)
       (setcdr alias expansion))))
+
+;;; This is called by mailalias.el.
+(defadvice build-mail-aliases (around sendmail-alias activate)
+  "Use `sendmail-alias-build-table' to parse the aliases file."
+  (sendmail-alias-build-table
+   'define-mail-alias 'mail-aliases (ad-get-arg 0)))
+
+;; This is called by mailabbrev.el
+;; Note that in order for mail-mode to use mailabbrev, you have to do:
+;;    (add-hook 'mail-setup-hook 'mail-abbrevs-setup)
+(defadvice build-mail-abbrevs (around sendmail-alias activate)
+  "Use `sendmail-alias-build-table' to parse the aliases file."
+  ;; Initialize mail-abbrevs so that we are not called recursively by
+  ;; define-mail-abbrev.
+  (unless (vectorp mail-abbrevs)
+    (setq mail-abbrevs nil)
+    (define-abbrev-table 'mail-abbrevs nil))
+
+  (sendmail-alias-build-table
+   'define-mail-abbrev 'mail-abbrevs (ad-get-arg 0)))
 
 
 (provide 'sendmail-alias)
